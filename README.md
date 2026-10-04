@@ -1,6 +1,6 @@
-# 🛡️ Phishing & Spam Message Detector
+# 🌫️ AI-Based Air Quality Forecasting System
 
-**Classifies spam/phishing-style messages — and explains exactly which signals triggered the flag.**
+**Forecasts PM2.5 and AQI for Indian cities — and fixes a data-leakage bug the original version had.**
 
 ![Python](https://img.shields.io/badge/Python-3776AB?style=flat&logo=python&logoColor=white)
 ![scikit-learn](https://img.shields.io/badge/scikit--learn-F7931E?style=flat&logo=scikitlearn&logoColor=white)
@@ -9,64 +9,59 @@
 
 ---
 
-## An honest framing, up front
+## What it does
 
-No dedicated phishing-email/URL dataset was available for this project — only the SMS Spam Collection (ham vs. spam SMS messages). Rather than mislabel what this is, it's built and documented as a **text-based spam/phishing-style message classifier**. It generalizes reasonably well because phishing and spam share the same manipulation tactics — urgency, prize bait, suspicious links, requests to "verify" something — which is exactly why the tool surfaces *which* signals it detected, not just a verdict.
+Two Random Forest Regressors forecast PM2.5 and AQI for Indian cities using lag/rolling pollution features, an Isolation Forest flags anomalous pollution spikes, and an interactive Streamlit dashboard exposes real-time prediction, trend analysis, and city comparison — including a 7-step autoregressive outlook.
+
+## A real bug, found and fixed
+
+The original version of this project computed lag/rolling features (PM2.5 yesterday, 2 days ago, etc.) by shifting the **entire** dataframe — ignoring city boundaries. Because rows from different cities were interleaved, a "lag" feature for a Chennai row could actually be pulling a completely unrelated city's PM2.5 value from the row above it: a data-leakage bug that inflates apparent accuracy while producing features that don't mean what they claim to. **Fixed** by computing lag/rolling features with `groupby("City")`, so a city's lag features only ever look at that city's own history.
 
 ## Architecture
 
 ```
-Raw message text (SMS Spam Collection — 5,572 messages, ham/spam)
-        │
-        ├──► Clean text (lowercase, strip punctuation except $/£/€/!)
-        │         │
-        │         ▼
-        │    TF-IDF vectorizer (unigrams + bigrams, 3,000 features)
-        │
-        └──► Engineer 8 signal features:
-             length, exclamation count, digit count, has_url,
-             has_phone_number, urgency_word_count, money_word_count,
-             ALL_CAPS_word_count
+Raw Excel dataset (10,000 rows, 12 Indian cities)
         │
         ▼
-   Combine (TF-IDF sparse matrix + scaled engineered features)
+Feature engineering (PER CITY via groupby): PM25_lag1/2/3, PM25_roll3,
+                                              aqi_lag1/2/3, aqi_roll3
+        │
+        ├──► Isolation Forest ──► anomaly flag
+        │
+        ├──► RandomForestRegressor #1 (16 features) ──► predicts PM2.5
+        │
+        └──► RandomForestRegressor #2 (17 features, includes PM2.5) ──► predicts AQI
         │
         ▼
-   Logistic Regression classifier ──► spam/phishing probability
-        │
-        ▼
-   Streamlit app: risk gauge + "why this was flagged" + awareness tips
+Streamlit dashboard: Prediction · Pollution Analysis · City Comparison
 ```
 
 ## Key engineering decisions
 
-- **Compared two model families before picking one.** Naive Bayes got perfect precision but noticeably lower recall; Logistic Regression traded a little precision for better, more balanced recall and a higher ROC-AUC — the right call for a security-relevant tool, where missing real phishing (a false negative) matters more than over-flagging.
-- **Added engineered features on top of TF-IDF, not instead of it.** Pure bag-of-words misses structural signals — a message can be phishing-flavored without using any single "spammy" word, just by combining a URL + urgency + a long number.
-- **Chose Logistic Regression for interpretability.** Its coefficients directly show which words/signals push a prediction toward spam, which lets the app show a genuine "why this was flagged" list instead of a black-box score.
+- **Fixed the cross-city data leakage** described above — the single highest-value change made to the original pipeline.
+- **Two-stage forecast, not a redundant input.** The original UI asked the user to type in PM2.5 *and* separately showed a predicted PM2.5 — two numbers that could disagree. Redesigned as a genuine pipeline: predict PM2.5 first, then feed that prediction into the AQI model as an input feature.
+- **Lag context pulled from history automatically.** A fresh manual entry has no history of its own — the dashboard pulls the selected city's most recent record to supply realistic lag features, the way a live sensor feed would.
 
 ## Results
 
-| Model | Precision | Recall | F1 | ROC-AUC |
-|---|---|---|---|---|
-| Multinomial NB (TF-IDF only) | 1.000 | 0.813 | 0.897 | 0.986 |
-| Logistic Regression (TF-IDF only) | 0.898 | 0.898 | 0.898 | 0.990 |
-| **Logistic Regression + engineered features (deployed)** | **0.991** | **0.898** | **0.943** | **0.992** |
+| Model | Features | RMSE | R² |
+|---|---|---|---|
+| PM2.5 (Random Forest, 200 trees, max_depth 12) | 16 | 7.94 | 0.987 |
+| AQI (Random Forest, 200 trees, max_depth 12) | 17 | 15.34 | 0.986 |
 
-Dataset: 5,572 messages (4,516 ham / 641 spam after deduplication) — `class_weight="balanced"` used to address the imbalance.
+Isolation Forest flagged ≈1.01% of readings as anomalous pollution spikes.
 
 ## Tech stack
 
-Python · scikit-learn (TfidfVectorizer, MultinomialNB, LogisticRegression) · pandas · NumPy · SciPy · Streamlit
+Python 3.10 · scikit-learn (RandomForestRegressor, IsolationForest) · pandas · NumPy · Streamlit · Plotly · openpyxl
 
 ## Project structure
 
 ```
-train_model.py          Cleans text, engineers features, trains + compares models
-app.py                   Streamlit app: message analyzer + model/dataset dashboard
-phishing_model.pkl        Final deployed Logistic Regression model
-vectorizer.pkl            Fitted TF-IDF vectorizer
-engineered_scaler.pkl     Fitted scaler for the 8 engineered features
-model_metrics.json        Full metrics, confusion matrix, top trigger words
+train_models.py             Cleans data, engineers features per-city, trains both models
+app.py                       Streamlit dashboard (3 tabs + 7-step outlook)
+pm25_model.pkl / aqi_model.pkl
+processed_pollution_data.csv
 requirements.txt
 ```
 
@@ -74,7 +69,7 @@ requirements.txt
 
 ```bash
 pip install -r requirements.txt
-python train_model.py     # regenerates model.pkl, vectorizer.pkl, metrics
+python train_models.py      # regenerates the models + processed_pollution_data.csv
 streamlit run app.py
 ```
 
